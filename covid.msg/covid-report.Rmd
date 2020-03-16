@@ -1,0 +1,326 @@
+---
+title: "covid-19 info"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output: 
+    flexdashboard::flex_dashboard:
+      orientation: rows
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+library(pacman)
+p_load(tidyverse, googlesheets4, myScrapers, RCurl, lubridate, rtweet, patchwork, tmap, leaflet, geojsonio, ggthemes)
+
+
+
+```
+
+Official COVID-19 info and guidance from PHE
+===========================================
+
+```{r phe-gov-publications, cache = TRUE}
+
+phe <- get_phe_catalogue(n = 350)
+
+phe %>%
+  filter(str_detect(Links, "corona|covid")) %>%
+  mutate(Links = str_remove_all(Links, "/government|/guidance"), 
+         Links = str_remove_all(Links, "/")) %>%
+knitr::kable()
+
+```
+---
+
+
+Data sources
+==================================================
+
+### Worldwide data
+
+* World-wide data from JHU datasheets https://github.com/CSSEGISandData/COVID-19/tree/master/csse_covid_19_data
+* These are extracted from the [JHU github repository](https://github.com/CSSEGISandData/COVID-19/tree/master/csse_covid_19_data)
+We have combined the data into a single long form table, corrected the dates, calculated country and region totals for cases, deaths and recovered patients (where it exists)
+* (Italian data from github repo)
+* [Singapore data](https://co.vid19.sg/)
+
+
+.
+
+---
+
+```{r jhu-data}
+
+cases <- read_csv("https://raw.githubusercontent.com/julianflowers1/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_19-covid-Confirmed.csv")
+deaths <- read_csv("https://raw.githubusercontent.com/julianflowers1/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_19-covid-Deaths.csv")
+recovered <- read_csv("https://raw.githubusercontent.com/julianflowers1/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_19-covid-Recovered.csv")
+
+cases <- cases %>%
+  gather(date, value, 5:ncol(.)) %>%
+  mutate(date1 = lubridate::mdy(date))
+
+deaths <- deaths %>%
+  gather(date, value, 5:ncol(.)) %>%
+  mutate(date1 = lubridate::mdy(date))
+
+recovered <- recovered %>%
+  gather(date, value, 5:ncol(.)) %>%
+  mutate(date1 = lubridate::mdy(date))
+
+combined_data <- bind_cols(cases, deaths = deaths$value, recovered = recovered$value)
+
+combined_data <- combined_data %>%
+  select(1:4, date1, cases = value, deaths:recovered) %>%
+  gather(metric, value, cases:recovered) %>%
+  janitor::clean_names() %>%
+  group_by(date1, country_region, metric) %>%
+  mutate(total = sum(value)) 
+
+combined_data <- combined_data %>%
+  select(country_region, province_state, date1, metric, value, country_total = total, lat, long)
+
+combined_data %>%
+  write_csv(paste0("combined-data-", Sys.Date(), ".csv"))
+
+head(combined_data)
+
+```
+
+UK data
+============================================
+
+* UK case data from coronavirus tracker
+* Tests and death counts from daily twitter feed
+* Area based cases from https://www.arcgis.com/home/item.html?id=b684319181f94875a6879bbc833ca3a6
+
+### Cases
+
+```{r}
+
+uk_cases <- readxl::read_excel("DailyConfirmedCases.xlsx") %>%
+  add_row()
+
+```
+
+### Tests and deaths
+
+```{r dhsc-data}
+
+source("get_uk_covid_data.R")  
+
+uk_tests <- get_uk_covid_data()
+
+uk_tests
+
+```
+
+### Local area data
+
+```{r la-data}
+la_cases <- read_csv("CountyUAs_cases_table.csv")
+
+la_shp <- geojsonio::geojson_read("https://opendata.arcgis.com/datasets/62774ee52e08477f8b65c8b2f15cecb8_0.geojson", what = "sp")
+
+str(la_shp)
+
+eng <- subset(la_shp, substr(ctyua18cd, 1, 1) == "E") ## restrict to England wards
+eng@data <- left_join(eng@data, la_cases, by=c("ctyua18cd" = "GSS_CD")) 
+
+
+
+```
+
+### Combined UK data
+
+```{r}
+
+combined_uk_data <- uk_cases %>% 
+  arrange(., desc(DateVal)) %>%
+  bind_cols(filter(uk_tests, date >= "2020-01-31")) %>%
+  select(DateVal:deaths) 
+
+combined_uk_data %>%
+  write_csv(paste("combined-uk-data-", Sys.Date(), ".csv"))
+
+
+
+```
+
+Statistics
+==========================
+
+```{r}
+
+options(digits = 2)
+
+combined_uk_stats <- uk_tests %>%
+  mutate(daily_cases = pos - lead(pos), 
+         daily_tests = total - lead(total), 
+         daily_deaths = deaths - lead(deaths), 
+         ref_date = date - 1, 
+         tests = total, 
+         daily_case_rate = round(daily_cases/daily_tests * 1000, 2), 
+         daily_death_rate = round(daily_deaths/daily_tests * 1000, 2),
+         daily_fatalty_rate = round(daily_deaths/daily_cases * 1000, 2), 
+         cumulative_case_rate = round(pos/total * 1000, 2), 
+         cumulative_death_rate = round(deaths/total * 1000, 2), 
+         cumulative_fatality_rate = round(deaths/pos * 1000, 2)
+         )
+
+combined_uk_stats %>%
+  knitr::kable()
+
+```
+
+Today's headline numbers
+=================================
+
+Row
+----------------------------------------
+```{r}
+today_tests <- combined_uk_stats$daily_tests[1]
+today_cases <- combined_uk_stats$daily_cases[1]
+today_deaths <- combined_uk_stats$daily_deaths[1]
+```
+
+### Cases per day
+
+```{r}
+latest_cases <- flexdashboard::valueBox(value = today_cases, caption = "Cases in the last 24 hours", color = "blue", icon = "fa-random")
+latest_cases
+```
+
+
+### Tests per day
+```{r}
+latest_tests <- flexdashboard::valueBox(value = today_tests, caption = "Tests in the last 24 hours", color = "grey", icon = "fa-tag")
+latest_tests
+```
+
+
+### Deaths per day
+
+```{r}
+latest_deaths <- flexdashboard::valueBox(value = today_deaths, caption = "Deaths in the last 24 hours", color = "red", icon = "fa-tag")
+latest_deaths
+```
+
+
+
+UK plots
+=======================================
+### Latest UK data
+#### Daily trends
+
+```{r, warning=FALSE, message = FALSE}
+
+cases <- combined_uk_stats %>%
+  gather(metric, value, c(2:3, total:daily_deaths, daily_case_rate:cumulative_fatality_rate)) %>%
+  filter(str_detect(metric, "[Cc]ase"), date >= "2020-02-25") %>%
+  ggplot(aes(date, value)) +
+  geom_point() +
+  geom_line(aes(group = metric)) +
+  geom_smooth(se = FALSE, method = "gam", lty = "dotted", lwd = 0.8) +
+  facet_wrap(~metric, scales = "free") +
+  ggthemes::theme_economist()
+
+```
+
+
+```{r}
+
+deaths <- combined_uk_stats %>%
+  gather(metric, value, c(2:3, total:daily_deaths, daily_case_rate:cumulative_fatality_rate)) %>%
+  filter(str_detect(metric, "death"), date >= "2020-02-25") %>%
+  ggplot(aes(date, value)) +
+  geom_point() +
+  geom_line(aes(group = metric)) +
+  geom_smooth(se = FALSE, method = "gam", lty = "dotted", lwd = 0.8) +
+  facet_wrap(~metric, scales = "free") +
+  ggthemes::theme_economist()
+```
+
+```{r fig.height=6}
+
+cases / deaths
+
+```
+
+International trends
+======================================
+
+#### Trends
+
+```{r fig.height= 12, fig.width= 12}
+options(scipen = 999)
+combined_data %>%
+  ggplot(aes(date1, value, colour = metric)) +
+  geom_line(aes(group = country_region)) +
+  facet_wrap(~country_region) +
+  theme(text = element_text(size = 9)) +
+  scale_y_log10() +
+  ggthemes::theme_economist_white()
+
+
+```
+
+International comparisons
+=====================================
+#### Latest country data
+
+```{r fig.height= 4}
+
+date_range <- range(combined_data$date1)
+
+cases_w <- combined_data %>%
+  filter(date1 == date_range[2], metric == "cases") %>%
+  group_by(country_region) %>%
+  summarise(cum_cases = sum(value)) %>%
+  arrange(-cum_cases) %>%
+  mutate(date = date_range[2]) %>%
+  filter(cum_cases > 29) 
+
+
+cases_ww <- cases_w %>%
+  ggplot(aes(cum_cases, reorder(country_region, cum_cases))) +
+  geom_col() +
+  labs(y = "") +
+  ggthemes::theme_economist_white()
+
+deaths_w <- combined_data %>%
+  filter(date1 == date_range[2], metric == "deaths") %>%
+  group_by(country_region) %>%
+  summarise(cum_deaths = sum(value)) %>%
+  arrange(-cum_deaths) %>%
+  mutate(date = date_range[2]) %>%
+  filter(cum_deaths > 4)
+
+
+deaths_ww <- deaths_w %>%
+  ggplot(aes(cum_deaths, reorder(country_region, cum_deaths))) +
+  geom_col() +
+  labs(y = "") +
+  ggthemes::theme_economist_white()
+
+```
+
+```{r fig.width=8}
+
+cases_ww + deaths_ww
+
+```
+
+LA map
+=============================================
+
+```{r}
+
+t <- tm_shape(eng) +
+  tm_fill("TotalCases", style = "jenks" , n = 5)  
+
+t %>%
+  tmap_leaflet()
+
+
+```
+
