@@ -16,7 +16,7 @@ p_load(tidyverse, googlesheets4, myScrapers, RCurl, lubridate, rtweet, patchwork
 
 ```
 
-Official COVID-19 info and guidance from PHE
+COVID-19 info and guidance from PHE
 ===========================================
 
 ```{r phe-gov-publications, cache = TRUE}
